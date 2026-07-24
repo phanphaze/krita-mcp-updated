@@ -49,8 +49,10 @@ def krita_get_canvas_preview(max_dimension: int = 1024) -> Image:
     if "error" in result:
         raise Exception(f"Krita Error: {result['error']}")
         
+    # krita_get_canvas_preview
     img_bytes = base64.b64decode(result["base64"])
-    return Image(data=img_bytes, format="image/png")
+    return Image(data=img_bytes, format="png")  # not "image/png"
+
 
 
 @mcp.tool()
@@ -72,8 +74,9 @@ def krita_get_canvas_region(x: int, y: int, width: int, height: int) -> Image:
     if "error" in result:
         raise Exception(f"Krita Error: {result['error']}")
         
+    # krita_get_canvas_preview
     img_bytes = base64.b64decode(result["base64"])
-    return Image(data=img_bytes, format="image/png")
+    return Image(data=img_bytes, format="png")  # not "image/png"
 
 
 @mcp.tool()

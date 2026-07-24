@@ -686,23 +686,24 @@ class KritaMCPExtension(Extension):
         buffer = QBuffer()
         buffer.open(QIODevice.WriteOnly)
         image.save(buffer, "PNG")
-        return buffer.data().toBase64().data().decode('utf-8')
+        png_bytes = bytes(buffer.data())          # copy into Python bytes immediately
+        return base64.b64encode(png_bytes).decode('utf-8')  # use Python's base64, not Qt's
 
     def cmd_get_canvas_preview(self, params):
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
-            
+
         max_dim = params.get("max_dimension", 0)
         w = doc.width()
         h = doc.height()
-        
-        pixel_data = doc.rootNode().projectionPixelData(0, 0, w, h)
+
+        pixel_data = bytes(doc.rootNode().projectionPixelData(0, 0, w, h))  # bytes() keeps buffer alive
         image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
-        
+
         if max_dim > 0 and (w > max_dim or h > max_dim):
             image = image.scaled(max_dim, max_dim, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            
+
         b64 = self._qimage_to_base64(image)
         return {"status": "ok", "base64": b64, "width": image.width(), "height": image.height()}
 
@@ -710,18 +711,18 @@ class KritaMCPExtension(Extension):
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
-            
+
         x = max(0, int(params.get("x", 0)))
         y = max(0, int(params.get("y", 0)))
         w = min(doc.width() - x, int(params.get("width", 100)))
         h = min(doc.height() - y, int(params.get("height", 100)))
-        
+
         if w <= 0 or h <= 0:
             return {"error": "Invalid region bounds"}
-            
-        pixel_data = doc.rootNode().projectionPixelData(x, y, w, h)
+
+        pixel_data = bytes(doc.rootNode().projectionPixelData(x, y, w, h))  # bytes() keeps buffer alive
         image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
-        
+
         b64 = self._qimage_to_base64(image)
         return {"status": "ok", "base64": b64, "width": w, "height": h, "x": x, "y": y}
 
