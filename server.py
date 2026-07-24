@@ -6,7 +6,8 @@ Uses FastMCP to expose Krita painting tools over the Model Context Protocol,
 communicating with a Krita plugin via HTTP.
 """
 
-from fastmcp import FastMCP, Image
+from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 import httpx
 import os
 from typing import Optional
