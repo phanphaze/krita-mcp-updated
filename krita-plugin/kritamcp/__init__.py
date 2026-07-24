@@ -697,7 +697,7 @@ class KritaMCPExtension(Extension):
         w = doc.width()
         h = doc.height()
         
-        pixel_data = doc.projectionPixelData(0, 0, w, h)
+        pixel_data = doc.rootNode().projectionPixelData(0, 0, w, h)
         image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
         
         if max_dim > 0 and (w > max_dim or h > max_dim):
@@ -719,7 +719,7 @@ class KritaMCPExtension(Extension):
         if w <= 0 or h <= 0:
             return {"error": "Invalid region bounds"}
             
-        pixel_data = doc.projectionPixelData(x, y, w, h)
+        pixel_data = doc.rootNode().projectionPixelData(x, y, w, h)
         image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
         
         b64 = self._qimage_to_base64(image)
