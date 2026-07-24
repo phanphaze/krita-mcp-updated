@@ -6,10 +6,78 @@ Uses FastMCP to expose Krita painting tools over the Model Context Protocol,
 communicating with a Krita plugin via HTTP.
 """
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Image
 import httpx
 import os
 from typing import Optional
+import base64
+
+# ... [Existing imports and configuration] ...
+
+@mcp.tool()
+def krita_get_canvas_preview(max_dimension: int = 1024) -> Image:
+    """
+    Export the current canvas and return it as an inline image to close the vision loop.
+    
+    Args:
+        max_dimension: Maximum width or height of the returned image. Reduces payload size for large canvases. Set to 0 for unscaled.
+    """
+    result = send_command("get_canvas_preview", {"max_dimension": max_dimension}, timeout=120.0)
+    
+    if "error" in result:
+        raise Exception(f"Krita Error: {result['error']}")
+        
+    img_bytes = base64.b64decode(result["base64"])
+    return Image(data=img_bytes, format="image/png")
+
+@mcp.tool()
+def krita_get_canvas_region(x: int, y: int, width: int, height: int) -> Image:
+    """
+    Export a specific cropped region of the canvas as an inline image.
+    Useful for inspecting fine details without transmitting the entire canvas.
+    
+    Args:
+        x: X coordinate of the top-left corner.
+        y: Y coordinate of the top-left corner.
+        width: Width of the region to inspect.
+        height: Height of the region to inspect.
+    """
+    result = send_command("get_canvas_region", {
+        "x": x, "y": y, "width": width, "height": height
+    }, timeout=60.0)
+    
+    if "error" in result:
+        raise Exception(f"Krita Error: {result['error']}")
+        
+    img_bytes = base64.b64decode(result["base64"])
+    return Image(data=img_bytes, format="image/png")
+
+@mcp.tool()
+def krita_list_layers() -> list[str | Image]:
+    """
+    List all layers in the document including their visibility, opacity, and a visual thumbnail.
+    """
+    result = send_command("list_layers", {}, timeout=30.0)
+    
+    if "error" in result:
+        return [f"Error: {result['error']}"]
+        
+    layers = result.get("layers", [])
+    if not layers:
+        return ["No layers found."]
+        
+    output = ["Document Layers:"]
+    for i, layer in enumerate(layers):
+        status = "Visible" if layer["visible"] else "Hidden"
+        opacity = int(layer["opacity"] / 255.0 * 100)
+        
+        output.append(f"Layer {i}: {layer['name']} ({layer['type']}) - {status}, Opacity: {opacity}%")
+        
+        if layer.get("thumbnail_base64"):
+            img_bytes = base64.b64decode(layer["thumbnail_base64"])
+            output.append(Image(data=img_bytes, format="image/png"))
+            
+    return output
 
 # Configuration
 KRITA_URL = os.environ.get("KRITA_URL", "http://localhost:5678")
@@ -34,6 +102,62 @@ def send_command(action: str, params: dict = None, timeout: float = 30.0) -> dic
     except Exception as e:
         return {"error": str(e)}
 
+@mcp.tool()
+def krita_draw_path(
+    points: list[list[float]],
+    is_bezier: bool = False,
+    size: float = 5.0,
+    color: str = "#ffffff",
+    opacity: float = 1.0,
+    blend_mode: str = "normal"
+) -> str:
+    """
+    Draw a continuous path or Bezier curve with opacity and blend modes.
+    
+    Args:
+        points: List of [x, y] coordinates. If is_bezier=True, sequence must be [start, ctrl1, ctrl2, end, ctrl1, ctrl2, end...].
+        is_bezier: Interpret points as cubic Bezier segments.
+        size: Stroke thickness.
+        color: Hex color string.
+        opacity: Stroke opacity (0.0 to 1.0).
+        blend_mode: Composition mode (e.g., normal, multiply, screen, overlay).
+    """
+    result = send_command("draw_path", {
+        "points": points, "is_bezier": is_bezier, "size": size,
+        "color": color, "opacity": opacity, "blend_mode": blend_mode
+    }, timeout=30.0)
+    
+    if "error" in result:
+        raise Exception(f"Krita Error: {result['error']}")
+    return "Path drawn successfully."
+
+@mcp.tool()
+def krita_fill_gradient(
+    gradient_type: str,
+    x1: float, y1: float, x2: float, y2: float,
+    color_stops: list[dict],
+    opacity: float = 1.0,
+    blend_mode: str = "normal"
+) -> str:
+    """
+    Fill the canvas with a linear or radial gradient.
+    
+    Args:
+        gradient_type: "linear" or "radial".
+        x1, y1: Start coordinate (or center for radial).
+        x2, y2: End coordinate (or edge radius target for radial).
+        color_stops: List of dictionaries formatting stops, e.g., [{"position": 0.0, "color": "#000000"}, {"position": 1.0, "color": "#ffffff"}].
+        opacity: Fill opacity (0.0 to 1.0).
+        blend_mode: Composition mode.
+    """
+    result = send_command("fill_gradient", {
+        "type": gradient_type, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "color_stops": color_stops, "opacity": opacity, "blend_mode": blend_mode
+    }, timeout=30.0)
+    
+    if "error" in result:
+        raise Exception(f"Krita Error: {result['error']}")
+    return f"{gradient_type.capitalize()} gradient applied successfully."
 
 @mcp.tool()
 def krita_health() -> str:

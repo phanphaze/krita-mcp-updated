@@ -3,12 +3,15 @@ Krita MCP Bridge - HTTP server for external paint commands in Krita
 Allows Claude (or any MCP client) to paint by sending commands to this plugin.
 """
 
+from fastapi import params
+
 from krita import *
-from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QPointF, QRectF
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QBrush, QLinearGradient, QRadialGradient
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QPointF, QRectF, QBuffer, QIODevice, Qt
 from PyQt5.QtWidgets import QMessageBox
 import json
 import threading
+import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import os
@@ -213,6 +216,16 @@ class KritaMCPExtension(Extension):
                 return self.cmd_list_brushes(params)
             elif action == "open_file":
                 return self.cmd_open_file(params)
+            elif action == "get_canvas_preview":
+                return self.cmd_get_canvas_preview(params)
+            elif action == "get_canvas_region":
+                return self.cmd_get_canvas_region(params)
+            elif action == "list_layers":
+                return self.cmd_list_layers(params)
+            elif action == "draw_path":
+                return self.cmd_draw_path(params)
+            elif action == "fill_gradient":
+                return self.cmd_fill_gradient(params)
             else:
                 return {"error": f"Unknown action: {action}"}
 
@@ -238,7 +251,121 @@ class KritaMCPExtension(Extension):
         if doc:
             return doc.activeNode()
         return None
+    def _get_composition_mode(self, mode_str):
+        """Map string blend modes to QPainter composition modes."""
+        modes = {
+            "normal": QPainter.CompositionMode_SourceOver,
+            "multiply": QPainter.CompositionMode_Multiply,
+            "screen": QPainter.CompositionMode_Screen,
+            "overlay": QPainter.CompositionMode_Overlay,
+            "darken": QPainter.CompositionMode_Darken,
+            "lighten": QPainter.CompositionMode_Lighten,
+            "color dodge": QPainter.CompositionMode_ColorDodge,
+            "color burn": QPainter.CompositionMode_ColorBurn,
+            "hard light": QPainter.CompositionMode_HardLight,
+            "soft light": QPainter.CompositionMode_SoftLight,
+            "difference": QPainter.CompositionMode_Difference,
+            "exclusion": QPainter.CompositionMode_Exclusion,
+            "clear": QPainter.CompositionMode_Clear
+        }
+        return modes.get(mode_str.lower(), QPainter.CompositionMode_SourceOver)
 
+
+    def _apply_qpainter(self, doc, layer, draw_func):
+        """Execute QPainter commands directly on layer pixel data."""
+        w, h = doc.width(), doc.height()
+        pixel_data = layer.pixelData(0, 0, w, h)
+        image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
+        
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        draw_func(painter)
+        
+        painter.end()
+        
+        ptr = image.bits()
+        ptr.setsize(image.byteCount())
+        layer.setPixelData(bytes(ptr), 0, 0, w, h)
+        doc.refreshProjection()
+
+
+    def cmd_draw_path(self, params):
+        doc = self.get_active_document()
+        layer = self.get_active_layer()
+        if not doc or not layer: 
+            return {"error": "No active document or layer"}
+
+        points = params.get("points", [])
+        if not points: 
+            return {"error": "No points provided"}
+
+        is_bezier = params.get("is_bezier", False)
+        size = params.get("size", 5.0)
+        color = QColor(params.get("color", "#ffffff"))
+        opacity = params.get("opacity", 1.0)
+        blend_mode = params.get("blend_mode", "normal")
+
+        def draw(painter):
+            painter.setCompositionMode(self._get_composition_mode(blend_mode))
+            painter.setOpacity(opacity)
+            
+            pen = QPen(color, size, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            
+            path = QPainterPath()
+            path.moveTo(points[0][0], points[0][1])
+            
+            if is_bezier:
+                idx = 1
+                while idx + 2 < len(points):
+                    path.cubicTo(
+                        points[idx][0], points[idx][1],
+                        points[idx+1][0], points[idx+1][1],
+                        points[idx+2][0], points[idx+2][1]
+                    )
+                    idx += 3
+            else:
+                for pt in points[1:]:
+                    path.lineTo(pt[0], pt[1])
+                    
+            painter.drawPath(path)
+
+        self._apply_qpainter(doc, layer, draw)
+        return {"status": "ok"}
+
+
+    def cmd_fill_gradient(self, params):
+        doc = self.get_active_document()
+        layer = self.get_active_layer()
+        if not doc or not layer: 
+            return {"error": "No active document or layer"}
+
+        gtype = params.get("type", "linear")
+        x1, y1 = params.get("x1", 0), params.get("y1", 0)
+        x2, y2 = params.get("x2", doc.width()), params.get("y2", doc.height())
+        color_stops = params.get("color_stops", [])
+        opacity = params.get("opacity", 1.0)
+        blend_mode = params.get("blend_mode", "normal")
+
+        def draw(painter):
+            painter.setCompositionMode(self._get_composition_mode(blend_mode))
+            painter.setOpacity(opacity)
+            
+            if gtype == "radial":
+                radius = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+                gradient = QRadialGradient(x1, y1, radius)
+            else:
+                gradient = QLinearGradient(x1, y1, x2, y2)
+                
+            for stop in color_stops:
+                gradient.setColorAt(stop["position"], QColor(stop["color"]))
+                
+            painter.fillRect(0, 0, doc.width(), doc.height(), QBrush(gradient))
+
+        self._apply_qpainter(doc, layer, draw)
+        return {"status": "ok"}
+    
     def cmd_new_canvas(self, params):
         """Create a new canvas."""
         width = params.get("width", 800)
@@ -626,6 +753,75 @@ class KritaMCPExtension(Extension):
 
         return {"status": "ok", "path": filepath}
 
+    def _qimage_to_base64(self, image):
+        """Helper to encode QImage to base64 string."""
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        return buffer.data().toBase64().data().decode('utf-8')
+
+    def cmd_get_canvas_preview(self, params):
+        """Return full canvas as a base64 encoded PNG, optionally downscaled."""
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+            
+        max_dim = params.get("max_dimension", 0)
+        w = doc.width()
+        h = doc.height()
+        
+        pixel_data = doc.projectionPixelData(0, 0, w, h)
+        image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
+        
+        if max_dim > 0 and (w > max_dim or h > max_dim):
+            image = image.scaled(max_dim, max_dim, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            
+        b64 = self._qimage_to_base64(image)
+        return {"status": "ok", "base64": b64, "width": image.width(), "height": image.height()}
+
+    def cmd_get_canvas_region(self, params):
+        """Return a cropped region of the canvas as a base64 encoded PNG."""
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+            
+        x = max(0, int(params.get("x", 0)))
+        y = max(0, int(params.get("y", 0)))
+        w = min(doc.width() - x, int(params.get("width", 100)))
+        h = min(doc.height() - y, int(params.get("height", 100)))
+        
+        if w <= 0 or h <= 0:
+            return {"error": "Invalid region bounds"}
+            
+        pixel_data = doc.projectionPixelData(x, y, w, h)
+        image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
+        
+        b64 = self._qimage_to_base64(image)
+        return {"status": "ok", "base64": b64, "width": w, "height": h, "x": x, "y": y}
+
+    def cmd_list_layers(self, params):
+        """Return layer metadata and base64 thumbnails."""
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+            
+        layers = doc.rootNode().childNodes()
+        result = []
+        
+        for node in layers:
+            thumb = node.thumbnail(128, 128)
+            b64_thumb = self._qimage_to_base64(thumb) if thumb else None
+            
+            result.append({
+                "name": node.name(),
+                "visible": node.visible(),
+                "opacity": node.opacity(),
+                "type": node.type(),
+                "thumbnail_base64": b64_thumb
+            })
+            
+        return {"status": "ok", "layers": result}
+    
     def cmd_undo(self, params):
         """Undo last action."""
         app = Krita.instance()
