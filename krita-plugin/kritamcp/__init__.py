@@ -207,6 +207,14 @@ class KritaMCPExtension(Extension):
                 return self.cmd_draw_path(params)
             elif action == "fill_gradient":
                 return self.cmd_fill_gradient(params)
+            elif action == "add_layer":
+                return self.cmd_add_layer(params)
+            elif action == "set_active_layer":
+                return self.cmd_set_active_layer(params)
+            elif action == "delete_layer":
+                return self.cmd_delete_layer(params)
+            elif action == "clear_layer":
+                return self.cmd_clear_layer(params)
             else:
                 return {"error": f"Unknown action: {action}"}
 
@@ -747,6 +755,88 @@ class KritaMCPExtension(Extension):
             })
             
         return {"status": "ok", "layers": result}
+
+    def cmd_add_layer(self, params):
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+
+        name = params.get("name", "Layer")
+        new_layer = doc.createNode(name, "paintlayer")
+
+        active = doc.activeNode()
+        parent = active.parentNode() if active else doc.rootNode()
+        parent.addChildNode(new_layer, active)  # inserts above active node
+
+        doc.setActiveNode(new_layer)
+        doc.refreshProjection()
+
+        return {"status": "ok", "name": name}
+
+    def cmd_set_active_layer(self, params):
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+
+        name = params.get("name")
+        if not name:
+            return {"error": "No layer name specified"}
+
+        def find_node(parent, target):
+            for node in parent.childNodes():
+                if node.name() == target:
+                    return node
+                found = find_node(node, target)
+                if found:
+                    return found
+            return None
+
+        node = find_node(doc.rootNode(), name)
+        if not node:
+            return {"error": f"Layer not found: {name}"}
+
+        doc.setActiveNode(node)
+        return {"status": "ok", "name": name}
+
+    def cmd_delete_layer(self, params):
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+
+        name = params.get("name")
+        if not name:
+            return {"error": "No layer name specified"}
+
+        def find_node(parent, target):
+            for node in parent.childNodes():
+                if node.name() == target:
+                    return node
+                found = find_node(node, target)
+                if found:
+                    return found
+            return None
+
+        node = find_node(doc.rootNode(), name)
+        if not node:
+            return {"error": f"Layer not found: {name}"}
+
+        node.remove()
+        doc.refreshProjection()
+        return {"status": "ok", "deleted": name}
+
+    def cmd_clear_layer(self, params):
+        """Clear the active layer to fully transparent."""
+        doc = self.get_active_document()
+        layer = self.get_active_layer()
+        if not doc or not layer:
+            return {"error": "No active document or layer"}
+
+        w, h = doc.width(), doc.height()
+        transparent = bytes([0, 0, 0, 0] * (w * h))
+        layer.setPixelData(transparent, 0, 0, w, h)
+        doc.refreshProjection()
+
+        return {"status": "ok", "layer": layer.name()}
     
     def cmd_undo(self, params):
         app = Krita.instance()

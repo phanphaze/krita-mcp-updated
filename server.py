@@ -102,7 +102,7 @@ def krita_list_layers() -> list[str | Image]:
         
         if layer.get("thumbnail_base64"):
             img_bytes = base64.b64decode(layer["thumbnail_base64"])
-            output.append(Image(data=img_bytes, format="image/png"))
+            output.append(Image(data=img_bytes, format="png"))
             
     return output
 
@@ -455,6 +455,58 @@ def krita_open_file(path: str) -> str:
 
     return f"Opened: {result.get('name', 'unknown')} ({result.get('width')}x{result.get('height')})"
 
+@mcp.tool()
+def krita_add_layer(name: str = "Layer") -> str:
+    """
+    Add a new transparent paint layer above the current active layer, and make it active.
+
+    Args:
+        name: Name for the new layer
+    """
+    result = send_command("add_layer", {"name": name})
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Added layer: {result.get('name')}"
+
+
+@mcp.tool()
+def krita_set_active_layer(name: str) -> str:
+    """
+    Set the active layer by name.
+
+    Args:
+        name: Exact name of the layer to activate
+    """
+    result = send_command("set_active_layer", {"name": name})
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Active layer set to: {name}"
+
+
+@mcp.tool()
+def krita_delete_layer(name: str) -> str:
+    """
+    Delete a layer by name.
+
+    Args:
+        name: Exact name of the layer to delete
+    """
+    result = send_command("delete_layer", {"name": name})
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Deleted layer: {name}"
+
+
+@mcp.tool()
+def krita_clear_layer() -> str:
+    """
+    Clear the active layer to fully transparent (erases all content on this layer only,
+    without affecting other layers).
+    """
+    result = send_command("clear_layer", {})
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Cleared layer: {result.get('layer')}"
 
 if __name__ == "__main__":
     mcp.run()
