@@ -3,8 +3,6 @@ Krita MCP Bridge - HTTP server for external paint commands in Krita
 Allows Claude (or any MCP client) to paint by sending commands to this plugin.
 """
 
-from fastapi import params
-
 from krita import *
 from PyQt5.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QBrush, QLinearGradient, QRadialGradient
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QPointF, QRectF, QBuffer, QIODevice, Qt
@@ -44,14 +42,7 @@ class CommandQueue:
         self.result_event.set()
 
     def get_result(self, command_id, timeout=120):
-        """Wait for result with timeout.
-
-        The default timeout of 120s is important — canvas export and save
-        operations can take a long time on large canvases. The original 30s
-        default caused frequent timeouts. The MCP server's send_command()
-        timeout must match or exceed this value.
-        """
-        start = threading.Event()
+        """Wait for result with timeout."""
         for _ in range(int(timeout * 10)):  # Check every 100ms
             with self.lock:
                 if command_id in self.results:
@@ -69,7 +60,6 @@ class PaintRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for paint commands."""
 
     def log_message(self, format, *args):
-        # Suppress HTTP logging
         pass
 
     def send_json_response(self, data, status=200):
@@ -110,12 +100,10 @@ class PaintRequestHandler(BaseHTTPRequestHandler):
             self.send_json_response({"error": "Invalid JSON"}, 400)
             return
 
-        # Assign command ID and queue it
         command_counter += 1
         command_id = command_counter
         command_queue.push(command_id, command)
 
-        # Wait for result from main thread
         result = command_queue.get_result(command_id)
 
         if "error" in result:
@@ -152,28 +140,22 @@ class KritaMCPExtension(Extension):
         self.current_opacity = 1.0
 
     def setup(self):
-        """Called when extension is loaded."""
         pass
 
     def createActions(self, window):
-        """Called when a new window is created."""
-        # Ensure output directory exists
         os.makedirs(CANVAS_OUTPUT_DIR, exist_ok=True)
 
-        # Start HTTP server
         if self.server_thread is None:
             self.server_thread = ServerThread(SERVER_PORT)
             self.server_thread.start()
             print(f"[KritaMCP] HTTP server started on port {SERVER_PORT}")
 
-        # Start timer to process command queue
         if self.timer is None:
             self.timer = QTimer()
             self.timer.timeout.connect(self.process_commands)
-            self.timer.start(50)  # Check every 50ms
+            self.timer.start(50)
 
     def process_commands(self):
-        """Process commands from queue in main thread."""
         item = command_queue.pop()
         if item is None:
             return
@@ -183,7 +165,6 @@ class KritaMCPExtension(Extension):
         command_queue.set_result(command_id, result)
 
     def execute_command(self, command):
-        """Execute a paint command and return result."""
         try:
             action = command.get("action")
             params = command.get("params", {})
@@ -233,12 +214,10 @@ class KritaMCPExtension(Extension):
             return {"error": str(e)}
 
     def get_active_document(self):
-        """Get active document or return None."""
         app = Krita.instance()
         return app.activeDocument()
 
     def get_active_view(self):
-        """Get active view or return None."""
         app = Krita.instance()
         window = app.activeWindow()
         if window:
@@ -246,13 +225,12 @@ class KritaMCPExtension(Extension):
         return None
 
     def get_active_layer(self):
-        """Get active paint layer."""
         doc = self.get_active_document()
         if doc:
             return doc.activeNode()
         return None
+
     def _get_composition_mode(self, mode_str):
-        """Map string blend modes to QPainter composition modes."""
         modes = {
             "normal": QPainter.CompositionMode_SourceOver,
             "multiply": QPainter.CompositionMode_Multiply,
@@ -270,25 +248,20 @@ class KritaMCPExtension(Extension):
         }
         return modes.get(mode_str.lower(), QPainter.CompositionMode_SourceOver)
 
-
     def _apply_qpainter(self, doc, layer, draw_func):
-        """Execute QPainter commands directly on layer pixel data."""
         w, h = doc.width(), doc.height()
         pixel_data = layer.pixelData(0, 0, w, h)
         image = QImage(pixel_data, w, h, QImage.Format_ARGB32)
         
         painter = QPainter(image)
         painter.setRenderHint(QPainter.Antialiasing)
-        
         draw_func(painter)
-        
         painter.end()
         
         ptr = image.bits()
         ptr.setsize(image.byteCount())
         layer.setPixelData(bytes(ptr), 0, 0, w, h)
         doc.refreshProjection()
-
 
     def cmd_draw_path(self, params):
         doc = self.get_active_document()
@@ -334,7 +307,6 @@ class KritaMCPExtension(Extension):
         self._apply_qpainter(doc, layer, draw)
         return {"status": "ok"}
 
-
     def cmd_fill_gradient(self, params):
         doc = self.get_active_document()
         layer = self.get_active_layer()
@@ -367,31 +339,25 @@ class KritaMCPExtension(Extension):
         return {"status": "ok"}
     
     def cmd_new_canvas(self, params):
-        """Create a new canvas."""
         width = params.get("width", 800)
         height = params.get("height", 600)
         name = params.get("name", "New Canvas")
         bg_color = params.get("background", "#1a1a2e")
 
         app = Krita.instance()
-
-        # Create document with background color
         doc = app.createDocument(width, height, name, "RGBA", "U8", "", 120.0)
 
         window = app.activeWindow()
         if window:
             window.addView(doc)
 
-        # Create a paint layer
         root = doc.rootNode()
         layer = doc.createNode("paint", "paintlayer")
         root.addChildNode(layer, None)
 
-        # Fill background using pixel data
         color = QColor(bg_color)
         r, g, b = color.red(), color.green(), color.blue()
 
-        # Create pixel data for entire canvas (BGRA format)
         pixel_data = bytes([b, g, r, 255] * (width * height))
         layer.setPixelData(pixel_data, 0, 0, width, height)
 
@@ -400,7 +366,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "width": width, "height": height, "name": name}
 
     def cmd_set_color(self, params):
-        """Set foreground color."""
         color_hex = params.get("color", "#ffffff")
 
         view = self.get_active_view()
@@ -414,7 +379,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "color": color_hex}
 
     def cmd_set_brush(self, params):
-        """Set brush preset and size."""
         preset_name = params.get("preset", None)
         size = params.get("size", None)
         opacity = params.get("opacity", None)
@@ -424,7 +388,6 @@ class KritaMCPExtension(Extension):
             return {"error": "No active view"}
 
         if preset_name:
-            # Find brush preset
             presets = Krita.instance().resources("preset")
             found = None
             for name, preset in presets.items():
@@ -442,15 +405,13 @@ class KritaMCPExtension(Extension):
 
         if opacity is not None:
             self.current_opacity = opacity
-            # Opacity is set per-stroke, store for later
 
         return {"status": "ok", "preset": preset_name, "size": size, "opacity": opacity}
 
     def cmd_stroke(self, params):
-        """Paint a stroke along points using pixel-level drawing with soft edges."""
         points = params.get("points", [])
         brush_size = params.get("size", self.current_brush_size)
-        hardness = params.get("hardness", 0.5)  # 0.0 = very soft, 1.0 = hard edge
+        hardness = params.get("hardness", 0.5)
         opacity = params.get("opacity", 1.0)
 
         if len(points) < 2:
@@ -466,7 +427,6 @@ class KritaMCPExtension(Extension):
         if not view:
             return {"error": "No active view"}
 
-        # Get current foreground color
         fg = view.foregroundColor()
         qcolor = fg.colorForCanvas(view.canvas())
         r, g, b = qcolor.red(), qcolor.green(), qcolor.blue()
@@ -475,7 +435,6 @@ class KritaMCPExtension(Extension):
         height = doc.height()
         radius = max(1, brush_size // 2)
 
-        # Calculate bounding box for all points plus brush radius
         min_x = max(0, int(min(p[0] for p in points)) - radius - 2)
         min_y = max(0, int(min(p[1] for p in points)) - radius - 2)
         max_x = min(width, int(max(p[0] for p in points)) + radius + 2)
@@ -487,14 +446,12 @@ class KritaMCPExtension(Extension):
         if w <= 0 or h <= 0:
             return {"error": "Stroke out of bounds"}
 
-        # Get existing pixel data for the affected region
         existing = layer.pixelData(min_x, min_y, w, h)
         pixels = bytearray(existing)
 
         import math
 
         def draw_soft_circle(cx, cy, point_opacity=1.0):
-            """Draw a soft circle with falloff at canvas coordinates."""
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
                     dist_sq = dx*dx + dy*dy
@@ -502,19 +459,14 @@ class KritaMCPExtension(Extension):
                         px = int(cx) + dx - min_x
                         py = int(cy) + dy - min_y
                         if 0 <= px < w and 0 <= py < h:
-                            # Calculate distance from center (0.0 to 1.0)
                             dist = math.sqrt(dist_sq) / radius if radius > 0 else 0
 
-                            # Apply hardness curve
-                            # hardness=1.0: sharp edge, hardness=0.0: gradual fade from center
                             if hardness >= 1.0:
                                 alpha_factor = 1.0
                             else:
-                                # Soft falloff: starts fading at hardness point
                                 if dist < hardness:
                                     alpha_factor = 1.0
                                 else:
-                                    # Smooth falloff from hardness to edge
                                     falloff = (dist - hardness) / (1.0 - hardness) if hardness < 1.0 else 0
                                     alpha_factor = 1.0 - falloff
 
@@ -522,13 +474,11 @@ class KritaMCPExtension(Extension):
 
                             if final_alpha > 0:
                                 idx = (py * w + px) * 4
-                                # Alpha blending with existing pixel
                                 existing_b = pixels[idx]
                                 existing_g = pixels[idx+1]
                                 existing_r = pixels[idx+2]
                                 existing_a = pixels[idx+3]
 
-                                # Simple alpha blend
                                 blend = final_alpha / 255.0
                                 new_r = int(existing_r * (1 - blend) + r * blend)
                                 new_g = int(existing_g * (1 - blend) + g * blend)
@@ -541,9 +491,7 @@ class KritaMCPExtension(Extension):
                                 pixels[idx+3] = new_a
 
         def draw_line(x1, y1, x2, y2):
-            """Draw a line using interpolation with soft brush circles."""
             dist = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            # More steps for smoother lines
             steps = max(1, int(dist / max(1, radius / 3)))
 
             for i in range(steps + 1):
@@ -552,7 +500,6 @@ class KritaMCPExtension(Extension):
                 y = y1 + t * (y2 - y1)
                 draw_soft_circle(x, y)
 
-        # Draw soft circles at each point and lines between them
         for i in range(len(points)):
             draw_soft_circle(points[i][0], points[i][1])
             if i > 0:
@@ -564,7 +511,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "points_count": len(points), "hardness": hardness}
 
     def cmd_fill(self, params):
-        """Fill a circular area with current color."""
         x = params.get("x", 0)
         y = params.get("y", 0)
         radius = params.get("radius", 50)
@@ -579,13 +525,10 @@ class KritaMCPExtension(Extension):
         if not view:
             return {"error": "No active view"}
 
-        # Get current foreground color
         fg = view.foregroundColor()
         qcolor = fg.colorForCanvas(view.canvas())
         r, g, b = qcolor.red(), qcolor.green(), qcolor.blue()
 
-        # Paint a filled circle using pixel data
-        # Create a bounding box
         x1 = max(0, x - radius)
         y1 = max(0, y - radius)
         x2 = min(doc.width(), x + radius)
@@ -596,22 +539,19 @@ class KritaMCPExtension(Extension):
         if w <= 0 or h <= 0:
             return {"error": "Fill area out of bounds"}
 
-        # Get existing pixel data
         existing = layer.pixelData(x1, y1, w, h)
         pixels = bytearray(existing)
 
-        # Draw circle
         for py in range(h):
             for px in range(w):
-                # Check if point is in circle
                 dx = (x1 + px) - x
                 dy = (y1 + py) - y
                 if dx*dx + dy*dy <= radius*radius:
                     idx = (py * w + px) * 4
-                    pixels[idx] = b      # B
-                    pixels[idx+1] = g    # G
-                    pixels[idx+2] = r    # R
-                    pixels[idx+3] = 255  # A
+                    pixels[idx] = b
+                    pixels[idx+1] = g
+                    pixels[idx+2] = r
+                    pixels[idx+3] = 255
 
         layer.setPixelData(bytes(pixels), x1, y1, w, h)
         doc.refreshProjection()
@@ -619,7 +559,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "x": x, "y": y, "radius": radius}
 
     def cmd_draw_shape(self, params):
-        """Draw a shape (rectangle, ellipse, line)."""
         shape = params.get("shape", "rectangle")
         x = params.get("x", 0)
         y = params.get("y", 0)
@@ -637,18 +576,15 @@ class KritaMCPExtension(Extension):
         if not view:
             return {"error": "No active view"}
 
-        # Get current foreground color
         fg = view.foregroundColor()
         qcolor = fg.colorForCanvas(view.canvas())
         r, g, b = qcolor.red(), qcolor.green(), qcolor.blue()
 
         if shape == "line":
-            # Draw line using pixel data
             x2 = params.get("x2", x + width)
             y2 = params.get("y2", y + height)
             line_width = params.get("line_width", 2)
 
-            # Calculate bounding box
             x1_bound = max(0, int(min(x, x2)) - line_width)
             y1_bound = max(0, int(min(y, y2)) - line_width)
             x2_bound = min(doc.width(), int(max(x, x2)) + line_width)
@@ -660,7 +596,6 @@ class KritaMCPExtension(Extension):
                 existing = layer.pixelData(x1_bound, y1_bound, w, h)
                 pixels = bytearray(existing)
 
-                # Draw line with thickness
                 dist = max(abs(x2 - x), abs(y2 - y))
                 steps = max(1, int(dist))
                 radius = max(1, line_width // 2)
@@ -683,7 +618,6 @@ class KritaMCPExtension(Extension):
 
                 layer.setPixelData(bytes(pixels), x1_bound, y1_bound, w, h)
         elif shape == "rectangle" and fill:
-            # Draw filled rectangle using pixel data
             x1 = max(0, int(x))
             y1 = max(0, int(y))
             x2 = min(doc.width(), int(x + width))
@@ -695,7 +629,6 @@ class KritaMCPExtension(Extension):
                 pixel_data = bytes([b, g, r, 255] * (w * h))
                 layer.setPixelData(pixel_data, x1, y1, w, h)
         elif shape == "ellipse" and fill:
-            # Draw filled ellipse using pixel data
             cx = x + width / 2
             cy = y + height / 2
             rx = width / 2
@@ -714,7 +647,6 @@ class KritaMCPExtension(Extension):
 
                 for py in range(h):
                     for px in range(w):
-                        # Check if point is in ellipse
                         dx = (x1 + px - cx) / rx if rx > 0 else 0
                         dy = (y1 + py - cy) / ry if ry > 0 else 0
                         if dx*dx + dy*dy <= 1:
@@ -733,20 +665,17 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "shape": shape}
 
     def cmd_get_canvas(self, params):
-        """Export current canvas to file and return path."""
         filename = params.get("filename", "canvas.png")
 
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
 
-        # Ensure filename has extension
         if not filename.endswith('.png'):
             filename += '.png'
 
         filepath = os.path.join(CANVAS_OUTPUT_DIR, filename)
 
-        # Export image (batch mode suppresses export dialog)
         doc.setBatchmode(True)
         doc.exportImage(filepath, InfoObject())
         doc.setBatchmode(False)
@@ -754,14 +683,12 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "path": filepath}
 
     def _qimage_to_base64(self, image):
-        """Helper to encode QImage to base64 string."""
         buffer = QBuffer()
         buffer.open(QIODevice.WriteOnly)
         image.save(buffer, "PNG")
         return buffer.data().toBase64().data().decode('utf-8')
 
     def cmd_get_canvas_preview(self, params):
-        """Return full canvas as a base64 encoded PNG, optionally downscaled."""
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
@@ -780,7 +707,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "base64": b64, "width": image.width(), "height": image.height()}
 
     def cmd_get_canvas_region(self, params):
-        """Return a cropped region of the canvas as a base64 encoded PNG."""
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
@@ -800,7 +726,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "base64": b64, "width": w, "height": h, "x": x, "y": y}
 
     def cmd_list_layers(self, params):
-        """Return layer metadata and base64 thumbnails."""
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
@@ -823,7 +748,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "layers": result}
     
     def cmd_undo(self, params):
-        """Undo last action."""
         app = Krita.instance()
         action = app.action('edit_undo')
         if action:
@@ -832,7 +756,6 @@ class KritaMCPExtension(Extension):
         return {"error": "Could not trigger undo"}
 
     def cmd_redo(self, params):
-        """Redo last undone action."""
         app = Krita.instance()
         action = app.action('edit_redo')
         if action:
@@ -841,23 +764,19 @@ class KritaMCPExtension(Extension):
         return {"error": "Could not trigger redo"}
 
     def cmd_clear(self, params):
-        """Clear the canvas."""
         layer = self.get_active_layer()
         if not layer:
             return {"error": "No active layer"}
 
         doc = self.get_active_document()
 
-        # Get canvas dimensions
         width = doc.width()
         height = doc.height()
 
-        # Clear by filling with background color
         bg_color = params.get("color", "#1a1a2e")
         color = QColor(bg_color)
         r, g, b = color.red(), color.green(), color.blue()
 
-        # Fill entire layer with color
         pixel_data = bytes([b, g, r, 255] * (width * height))
         layer.setPixelData(pixel_data, 0, 0, width, height)
 
@@ -866,7 +785,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "color": bg_color}
 
     def cmd_save(self, params):
-        """Save to specific path."""
         filepath = params.get("path")
         if not filepath:
             return {"error": "No path specified"}
@@ -875,7 +793,6 @@ class KritaMCPExtension(Extension):
         if not doc:
             return {"error": "No active document"}
 
-        # Batch mode suppresses export dialog
         doc.setBatchmode(True)
         doc.exportImage(filepath, InfoObject())
         doc.setBatchmode(False)
@@ -883,7 +800,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "path": filepath}
 
     def cmd_get_color_at(self, params):
-        """Get color at specific pixel (eyedropper)."""
         x = params.get("x", 0)
         y = params.get("y", 0)
 
@@ -891,12 +807,10 @@ class KritaMCPExtension(Extension):
         if not doc:
             return {"error": "No active document"}
 
-        # Get projection pixel data at point
         layer = doc.rootNode()
         pixel_data = layer.projectionPixelData(x, y, 1, 1)
 
         if len(pixel_data) >= 4:
-            # RGBA
             b, g, r, a = pixel_data[0], pixel_data[1], pixel_data[2], pixel_data[3]
             hex_color = "#{:02x}{:02x}{:02x}".format(r, g, b)
             return {"status": "ok", "color": hex_color, "r": r, "g": g, "b": b, "a": a}
@@ -904,7 +818,6 @@ class KritaMCPExtension(Extension):
         return {"error": "Could not read pixel"}
 
     def cmd_list_brushes(self, params):
-        """List available brush presets."""
         filter_str = params.get("filter", "")
         limit = params.get("limit", 50)
 
@@ -920,7 +833,6 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "brushes": brush_list, "count": len(brush_list)}
 
     def cmd_open_file(self, params):
-        """Open an existing file in Krita."""
         filepath = params.get("path")
         if not filepath:
             return {"error": "No path specified"}
@@ -930,12 +842,10 @@ class KritaMCPExtension(Extension):
 
         app = Krita.instance()
 
-        # Open the document
         doc = app.openDocument(filepath)
         if not doc:
             return {"error": f"Failed to open: {filepath}"}
 
-        # Add view to active window
         window = app.activeWindow()
         if window:
             window.addView(doc)
@@ -943,5 +853,4 @@ class KritaMCPExtension(Extension):
         return {"status": "ok", "path": filepath, "name": doc.name(), "width": doc.width(), "height": doc.height()}
 
 
-# Register the extension
 Krita.instance().addExtension(KritaMCPExtension(Krita.instance()))

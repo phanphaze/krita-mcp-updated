@@ -5,15 +5,36 @@ Bridge between Claude (or any MCP client) and Krita painting application.
 Uses FastMCP to expose Krita painting tools over the Model Context Protocol,
 communicating with a Krita plugin via HTTP.
 """
-
+import base64
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 import httpx
 import os
 from typing import Optional
-import base64
 
-# ... [Existing imports and configuration] ...
+# Configuration
+KRITA_URL = os.environ.get("KRITA_URL", "http://localhost:5678")
+
+mcp = FastMCP("krita-mcp")
+
+
+def send_command(action: str, params: dict = None, timeout: float = 30.0) -> dict:
+    """Send command to Krita plugin and return result."""
+    if params is None:
+        params = {}
+
+    try:
+        response = httpx.post(
+            KRITA_URL,
+            json={"action": action, "params": params},
+            timeout=timeout
+        )
+        return response.json()
+    except httpx.ConnectError:
+        return {"error": "Cannot connect to Krita. Is Krita running with the MCP plugin enabled?"}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 @mcp.tool()
 def krita_get_canvas_preview(max_dimension: int = 1024) -> Image:
@@ -30,6 +51,7 @@ def krita_get_canvas_preview(max_dimension: int = 1024) -> Image:
         
     img_bytes = base64.b64decode(result["base64"])
     return Image(data=img_bytes, format="image/png")
+
 
 @mcp.tool()
 def krita_get_canvas_region(x: int, y: int, width: int, height: int) -> Image:
@@ -52,6 +74,7 @@ def krita_get_canvas_region(x: int, y: int, width: int, height: int) -> Image:
         
     img_bytes = base64.b64decode(result["base64"])
     return Image(data=img_bytes, format="image/png")
+
 
 @mcp.tool()
 def krita_list_layers() -> list[str | Image]:
@@ -80,28 +103,6 @@ def krita_list_layers() -> list[str | Image]:
             
     return output
 
-# Configuration
-KRITA_URL = os.environ.get("KRITA_URL", "http://localhost:5678")
-
-mcp = FastMCP("krita-mcp")
-
-
-def send_command(action: str, params: dict = None, timeout: float = 30.0) -> dict:
-    """Send command to Krita plugin and return result."""
-    if params is None:
-        params = {}
-
-    try:
-        response = httpx.post(
-            KRITA_URL,
-            json={"action": action, "params": params},
-            timeout=timeout
-        )
-        return response.json()
-    except httpx.ConnectError:
-        return {"error": "Cannot connect to Krita. Is Krita running with the MCP plugin enabled?"}
-    except Exception as e:
-        return {"error": str(e)}
 
 @mcp.tool()
 def krita_draw_path(
@@ -132,6 +133,7 @@ def krita_draw_path(
         raise Exception(f"Krita Error: {result['error']}")
     return "Path drawn successfully."
 
+
 @mcp.tool()
 def krita_fill_gradient(
     gradient_type: str,
@@ -159,6 +161,7 @@ def krita_fill_gradient(
     if "error" in result:
         raise Exception(f"Krita Error: {result['error']}")
     return f"{gradient_type.capitalize()} gradient applied successfully."
+
 
 @mcp.tool()
 def krita_health() -> str:
@@ -338,7 +341,6 @@ def krita_get_canvas(filename: str = "canvas.png") -> str:
     Args:
         filename: Output filename (saved to configured output directory)
     """
-    # Extended timeout — canvas export can take a while on large canvases
     result = send_command("get_canvas", {"filename": filename}, timeout=120.0)
 
     if "error" in result:
@@ -391,7 +393,6 @@ def krita_save(path: str) -> str:
     Args:
         path: Full file path to save to (e.g., "C:/art/my_painting.png")
     """
-    # Extended timeout — saving large files can take a while
     result = send_command("save", {"path": path}, timeout=120.0)
 
     if "error" in result:
