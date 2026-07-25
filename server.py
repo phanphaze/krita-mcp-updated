@@ -80,31 +80,46 @@ def krita_get_canvas_region(x: int, y: int, width: int, height: int) -> Image:
 
 
 @mcp.tool()
-def krita_list_layers() -> list[str | Image]:
+def krita_list_layers() -> str:
     """
-    List all layers in the document including their visibility, opacity, and a visual thumbnail.
+    List all layers in the document including their name, visibility, opacity, and type.
+    Use krita_get_layer_thumbnail(name) to visually inspect a specific layer's contents.
     """
     result = send_command("list_layers", {}, timeout=30.0)
-    
+
     if "error" in result:
-        return [f"Error: {result['error']}"]
-        
+        return f"Error: {result['error']}"
+
     layers = result.get("layers", [])
     if not layers:
-        return ["No layers found."]
-        
-    output = ["Document Layers:"]
+        return "No layers found."
+
+    lines = ["Document Layers:"]
     for i, layer in enumerate(layers):
         status = "Visible" if layer["visible"] else "Hidden"
         opacity = int(layer["opacity"] / 255.0 * 100)
-        
-        output.append(f"Layer {i}: {layer['name']} ({layer['type']}) - {status}, Opacity: {opacity}%")
-        
-        if layer.get("thumbnail_base64"):
-            img_bytes = base64.b64decode(layer["thumbnail_base64"])
-            output.append(Image(data=img_bytes, format="png"))
-            
-    return output
+        lines.append(f"  {i}: {layer['name']} ({layer['type']}) - {status}, Opacity: {opacity}%")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def krita_get_layer_thumbnail(name: str, size: int = 128) -> Image:
+    """
+    Get a visual thumbnail of one specific layer by name, so you can inspect a single
+    layer's contents in isolation without it being composited with other layers.
+
+    Args:
+        name: Exact name of the layer to inspect (see krita_list_layers).
+        size: Thumbnail width/height in pixels (default 128).
+    """
+    result = send_command("get_layer_thumbnail", {"name": name, "size": size}, timeout=30.0)
+
+    if "error" in result:
+        raise Exception(f"Krita Error: {result['error']}")
+
+    img_bytes = base64.b64decode(result["base64"])
+    return Image(data=img_bytes, format="png")
 
 
 @mcp.tool()
@@ -250,21 +265,31 @@ def krita_set_brush(
 
 
 @mcp.tool()
-def krita_stroke(points: list[list[int]], pressure: float = 1.0) -> str:
+def krita_stroke(
+    points: list[list[int]],
+    pressure: float = 1.0,
+    opacity: Optional[float] = None,
+    hardness: Optional[float] = None
+) -> str:
     """
     Paint a stroke through a series of points.
 
     Args:
         points: List of [x, y] coordinate pairs, e.g., [[100, 100], [150, 120], [200, 150]]
-        pressure: Brush pressure (0.0 to 1.0, affects stroke thickness/opacity)
+        pressure: Brush pressure (0.0 to 1.0). Multiplies against opacity to lighten the stroke.
+        opacity: Stroke opacity (0.0 to 1.0). Defaults to the opacity set via krita_set_brush.
+        hardness: Brush edge hardness (0.0 soft to 1.0 hard). Defaults to 0.5.
     """
     if len(points) < 2:
         return "Error: Need at least 2 points for a stroke"
 
-    result = send_command("stroke", {
-        "points": points,
-        "pressure": pressure
-    })
+    params = {"points": points, "pressure": pressure}
+    if opacity is not None:
+        params["opacity"] = opacity
+    if hardness is not None:
+        params["hardness"] = hardness
+
+    result = send_command("stroke", params)
 
     if "error" in result:
         return f"Error: {result['error']}"

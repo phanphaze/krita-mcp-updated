@@ -63,10 +63,15 @@ class PaintRequestHandler(BaseHTTPRequestHandler):
         pass
 
     def send_json_response(self, data, status=200):
+        body = json.dumps(data).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))  # BUG FIX: was missing,
+        # which forced the client to infer the response body's end from the
+        # connection closing rather than a declared length -- unreliable for the
+        # larger payloads that image preview/region/thumbnail responses produce.
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(body)
 
     def do_GET(self):
         """Handle GET requests - mainly for health check."""
@@ -80,8 +85,12 @@ class PaintRequestHandler(BaseHTTPRequestHandler):
                 "canvas_dir": CANVAS_OUTPUT_DIR,
                 "commands": [
                     "new_canvas", "set_color", "set_brush", "stroke",
-                    "fill", "draw_shape", "get_canvas", "undo", "redo",
-                    "clear", "save", "get_color_at", "list_brushes"
+                    "fill", "draw_shape", "draw_path", "fill_gradient",
+                    "get_canvas", "get_canvas_preview", "get_canvas_region",
+                    "undo", "redo", "clear", "save", "get_color_at",
+                    "list_brushes", "open_file", "list_layers",
+                    "get_layer_thumbnail", "add_layer", "set_active_layer",
+                    "delete_layer", "clear_layer"
                 ]
             })
         else:
@@ -203,6 +212,8 @@ class KritaMCPExtension(Extension):
                 return self.cmd_get_canvas_region(params)
             elif action == "list_layers":
                 return self.cmd_list_layers(params)
+            elif action == "get_layer_thumbnail":
+                return self.cmd_get_layer_thumbnail(params)
             elif action == "draw_path":
                 return self.cmd_draw_path(params)
             elif action == "fill_gradient":
@@ -360,8 +371,19 @@ class KritaMCPExtension(Extension):
             window.addView(doc)
 
         root = doc.rootNode()
+
+        # createDocument() auto-creates its own default layer (e.g. "Background").
+        # Remove it so the canvas starts with exactly one known layer instead of a
+        # hidden extra one sitting in the stack alongside ours.
+        for existing in list(root.childNodes()):
+            existing.remove()
+
         layer = doc.createNode("paint", "paintlayer")
         root.addChildNode(layer, None)
+        doc.setActiveNode(layer)  # BUG FIX: without this, doc.activeNode() stayed on
+        # Krita's auto-created default layer, so every subsequent stroke/fill/draw_shape
+        # call (which paints onto get_active_layer()) could silently target the wrong
+        # layer instead of the one that's actually visible/intended.
 
         color = QColor(bg_color)
         r, g, b = color.red(), color.green(), color.blue()
@@ -420,7 +442,9 @@ class KritaMCPExtension(Extension):
         points = params.get("points", [])
         brush_size = params.get("size", self.current_brush_size)
         hardness = params.get("hardness", 0.5)
-        opacity = params.get("opacity", 1.0)
+        pressure = params.get("pressure", 1.0)
+        base_opacity = params.get("opacity", self.current_opacity)
+        opacity = max(0.0, min(1.0, base_opacity * pressure))
 
         if len(points) < 2:
             return {"error": "Need at least 2 points for a stroke"}
@@ -625,46 +649,27 @@ class KritaMCPExtension(Extension):
                                     pixels[idx+3] = 255
 
                 layer.setPixelData(bytes(pixels), x1_bound, y1_bound, w, h)
-        elif shape == "rectangle" and fill:
-            x1 = max(0, int(x))
-            y1 = max(0, int(y))
-            x2 = min(doc.width(), int(x + width))
-            y2 = min(doc.height(), int(y + height))
-            w = x2 - x1
-            h = y2 - y1
+        elif shape in ("rectangle", "ellipse"):
+            stroke = params.get("stroke", False)  # BUG FIX: this was accepted by
+            # server.py's tool schema but never actually read here, so outline-only
+            # shapes (fill=False, stroke=True) always fell through to the
+            # "not supported" error below, no matter what the caller asked for.
 
-            if w > 0 and h > 0:
-                pixel_data = bytes([b, g, r, 255] * (w * h))
-                layer.setPixelData(pixel_data, x1, y1, w, h)
-        elif shape == "ellipse" and fill:
-            cx = x + width / 2
-            cy = y + height / 2
-            rx = width / 2
-            ry = height / 2
+            if not fill and not stroke:
+                return {"error": f"Shape '{shape}' needs fill=True and/or stroke=True"}
 
-            x1 = max(0, int(x))
-            y1 = max(0, int(y))
-            x2 = min(doc.width(), int(x + width))
-            y2 = min(doc.height(), int(y + height))
-            w = x2 - x1
-            h = y2 - y1
+            line_width = params.get("line_width", 2)
 
-            if w > 0 and h > 0:
-                existing = layer.pixelData(x1, y1, w, h)
-                pixels = bytearray(existing)
+            def draw(painter):
+                painter.setBrush(QBrush(qcolor) if fill else Qt.NoBrush)
+                painter.setPen(QPen(qcolor, line_width) if stroke else Qt.NoPen)
+                rect = QRectF(x, y, width, height)
+                if shape == "rectangle":
+                    painter.drawRect(rect)
+                else:
+                    painter.drawEllipse(rect)
 
-                for py in range(h):
-                    for px in range(w):
-                        dx = (x1 + px - cx) / rx if rx > 0 else 0
-                        dy = (y1 + py - cy) / ry if ry > 0 else 0
-                        if dx*dx + dy*dy <= 1:
-                            idx = (py * w + px) * 4
-                            pixels[idx] = b
-                            pixels[idx+1] = g
-                            pixels[idx+2] = r
-                            pixels[idx+3] = 255
-
-                layer.setPixelData(bytes(pixels), x1, y1, w, h)
+            self._apply_qpainter(doc, layer, draw)
         else:
             return {"error": f"Shape '{shape}' with current options not supported"}
 
@@ -734,27 +739,57 @@ class KritaMCPExtension(Extension):
         b64 = self._qimage_to_base64(image)
         return {"status": "ok", "base64": b64, "width": w, "height": h, "x": x, "y": y}
 
+    def _find_node(self, parent, target):
+        """Depth-first search for a node by exact name."""
+        for node in parent.childNodes():
+            if node.name() == target:
+                return node
+            found = self._find_node(node, target)
+            if found:
+                return found
+        return None
+
     def cmd_list_layers(self, params):
         doc = self.get_active_document()
         if not doc:
             return {"error": "No active document"}
-            
+
         layers = doc.rootNode().childNodes()
         result = []
-        
+
         for node in layers:
-            thumb = node.thumbnail(128, 128)
-            b64_thumb = self._qimage_to_base64(thumb) if thumb else None
-            
             result.append({
                 "name": node.name(),
                 "visible": node.visible(),
                 "opacity": node.opacity(),
                 "type": node.type(),
-                "thumbnail_base64": b64_thumb
             })
-            
+
         return {"status": "ok", "layers": result}
+
+    def cmd_get_layer_thumbnail(self, params):
+        doc = self.get_active_document()
+        if not doc:
+            return {"error": "No active document"}
+
+        name = params.get("name")
+        if not name:
+            return {"error": "No layer name specified"}
+
+        node = self._find_node(doc.rootNode(), name)
+        if not node:
+            return {"error": f"Layer not found: {name}"}
+
+        size = max(16, min(512, int(params.get("size", 128))))
+        thumb = node.thumbnail(size, size)
+
+        # BUG FIX: `if thumb else None` never catches a null QImage -- Qt objects
+        # are truthy in Python regardless of isNull(). Check isNull() explicitly.
+        if thumb is None or thumb.isNull():
+            return {"error": f"Could not generate a thumbnail for layer: {name}"}
+
+        b64 = self._qimage_to_base64(thumb)
+        return {"status": "ok", "base64": b64, "width": thumb.width(), "height": thumb.height()}
 
     def cmd_add_layer(self, params):
         doc = self.get_active_document()
@@ -782,16 +817,7 @@ class KritaMCPExtension(Extension):
         if not name:
             return {"error": "No layer name specified"}
 
-        def find_node(parent, target):
-            for node in parent.childNodes():
-                if node.name() == target:
-                    return node
-                found = find_node(node, target)
-                if found:
-                    return found
-            return None
-
-        node = find_node(doc.rootNode(), name)
+        node = self._find_node(doc.rootNode(), name)
         if not node:
             return {"error": f"Layer not found: {name}"}
 
@@ -807,16 +833,7 @@ class KritaMCPExtension(Extension):
         if not name:
             return {"error": "No layer name specified"}
 
-        def find_node(parent, target):
-            for node in parent.childNodes():
-                if node.name() == target:
-                    return node
-                found = find_node(node, target)
-                if found:
-                    return found
-            return None
-
-        node = find_node(doc.rootNode(), name)
+        node = self._find_node(doc.rootNode(), name)
         if not node:
             return {"error": f"Layer not found: {name}"}
 
